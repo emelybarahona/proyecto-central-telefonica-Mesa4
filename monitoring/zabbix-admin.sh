@@ -16,6 +16,8 @@
 #   ./zabbix-admin.sh monitor servidor   # script de monitoreo + systemd timer
 #   ./zabbix-admin.sh monitor nodo       # igual, pero para un nodo normal
 #   ./zabbix-admin.sh estado             # resumen de cómo quedó todo
+#   ./zabbix-admin.sh diagnostico        # muestra por qué no arranca zabbix-server
+#   ./zabbix-admin.sh reparar            # BORRA y vuelve a crear la base de datos de Zabbix
 #
 # Orden recomendado en el servidor: hardening, servidor, firewall, monitor servidor.
 # Orden recomendado en cada nodo:   hardening, agente, monitor nodo.
@@ -32,7 +34,10 @@ NODOS="192.168.50.10 192.168.50.12"
 DB_NOMBRE="zabbix"
 DB_USUARIO="zabbix"
 ARCHIVO_CLAVE_DB="/root/.zabbix-db-pass"   
-REDES_ADMIN="192.168.50.0/24 192.168.122.0/24" 
+# Redes desde donde se permite SSH y la web: WireGuard, red de las VM (libvirt) y el Wi-Fi.
+REDES_ADMIN="192.168.50.0/24 192.168.122.0/24 192.168.13.0/24"
+# Puerto UDP donde escucha WireGuard (el ListenPort de wg0.conf). Antes 51820, ahora 443.
+WG_PUERTO="443"
 UMBRAL_DISCO=90                      
 UMBRAL_MEMORIA=90                   
 LOG="/var/log/zabbix-admin.log"
@@ -128,7 +133,7 @@ fase_hardening() {
     # Freno de seguridad: si todavía no hay llave pública copiada, deshabilitar
     # la contraseña dejaría la VM inaccesible. Mejor parar aquí.
     if [[ ! -s "${home}/.ssh/authorized_keys" ]]; then
-        falla "No hay llaves en ${home}/.ssh/authorized_keys. Desde tu PC corre primero: ssh-copy-id ${usuario}@IP-DE-ESTA-VM"
+        falla "No hay llaves en ${home}/.ssh/authorized_keys (usuario ${usuario}). Primero, desde tu PC (fuera de la VM), corre: ssh-copy-id ${usuario}@IP-DE-LA-VM  (la IP se ve aquí con: ip -br a). Después vuelve a correr este modo."
     fi
 
     asegurar_paquete openssh-server
@@ -137,7 +142,7 @@ fase_hardening() {
     # Se usa el prefijo 00 porque en Ubuntu 24.04 gana la PRIMERA línea que
     # sshd lee, y archivos como 50-cloud-init.conf podrían reactivar la contraseña.
     escribir_si_cambia /etc/ssh/sshd_config.d/00-hardening.conf 644 <<'EOF'
-# Generado por zabbix-setup.sh
+# Generado por zabbix-admin.sh
 PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
@@ -163,7 +168,7 @@ EOF
 
     # En vez de editar jail.conf (que se pisa al actualizar) se usa un archivo propio.
     escribir_si_cambia /etc/fail2ban/jail.d/proyecto.local 644 <<'EOF'
-# Generado por zabbix-setup.sh
+# Generado por zabbix-admin.sh
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -213,7 +218,13 @@ fase_firewall() {
         regla_iptables -A INPUT -s "$red" -p tcp --dport 80 -j ACCEPT
     done
     # Túnel WireGuard y puerto del servidor Zabbix (agentes activos) desde la VPN.
-    regla_iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+    regla_iptables -A INPUT -p udp --dport "$WG_PUERTO" -j ACCEPT
+    # Si el puerto de WireGuard cambió, se quita la regla vieja del 51820 para no dejarlo abierto.
+    if [[ "$WG_PUERTO" != "51820" ]] && iptables -C INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null; then
+        iptables -D INPUT -p udp --dport 51820 -j ACCEPT
+        log "iptables: regla vieja del puerto 51820 eliminada"
+        CAMBIOS=1
+    fi
     regla_iptables -A INPUT -s 192.168.50.0/24 -p tcp --dport 10051 -j ACCEPT
 
     # Todo lo demás que entra se descarta.
@@ -226,6 +237,40 @@ fase_firewall() {
     fi
     netfilter-persistent save >>"$LOG" 2>&1
     log "Reglas guardadas. Ver con: sudo iptables -S"
+}
+
+# Diagnóstico: reúne lo que hace falta para saber por qué no arranca zabbix-server.
+diagnostico() {
+    echo "--- Servicios:"
+    local sv
+    for sv in mariadb zabbix-server zabbix-agent2 apache2; do
+        printf '  %-16s %s\n' "$sv" "$(systemctl is-active "$sv" 2>/dev/null || true)"
+    done
+    echo "--- Últimas líneas del registro de zabbix-server (la causa casi siempre sale aquí):"
+    tail -n 15 /var/log/zabbix/zabbix_server.log 2>/dev/null || echo "  (todavía no hay registro)"
+    echo "--- journalctl:"
+    journalctl -u zabbix-server -n 10 --no-pager 2>/dev/null || true
+    echo "--- Conexión a la base con el usuario de Zabbix:"
+    if [[ -s "$ARCHIVO_CLAVE_DB" ]] && MYSQL_PWD="$(cat "$ARCHIVO_CLAVE_DB")" \
+        mariadb -h127.0.0.1 -u"$DB_USUARIO" "$DB_NOMBRE" \
+        -e "SELECT COUNT(*) AS tablas FROM information_schema.tables WHERE table_schema='${DB_NOMBRE}';" 2>/dev/null; then
+        :
+    else
+        echo "  no se pudo conectar como ${DB_USUARIO}"
+    fi
+    echo "--- Parámetros de conexión en zabbix_server.conf (sin la clave):"
+    grep -E '^(DBHost|DBName|DBUser|DBPort|DBSocket)=' /etc/zabbix/zabbix_server.conf || true
+}
+
+# Reparar: borra la base y la vuelve a crear. Solo para cuando el esquema quedó a medias.
+reparar() {
+    aviso "Esto BORRA la base de datos '${DB_NOMBRE}' y la crea de nuevo desde cero."
+    read -r -p "Escribe SI para continuar: " respuesta
+    [[ "$respuesta" == "SI" ]] || falla "Cancelado."
+    systemctl stop zabbix-server >>"$LOG" 2>&1 || true
+    mariadb -e "DROP DATABASE IF EXISTS ${DB_NOMBRE};"
+    CAMBIOS=1
+    fase_servidor
 }
 
 # Servidor de Zabbix
@@ -250,27 +295,50 @@ fase_servidor() {
     fi
     local clave; clave="$(cat "$ARCHIVO_CLAVE_DB")"
 
+    # MariaDB tiene que estar corriendo antes de crear la base.
+    systemctl enable --now mariadb >>"$LOG" 2>&1
+
     # Los IF NOT EXISTS hacen que repetir esto no dé error ni duplique nada.
     mariadb -e "CREATE DATABASE IF NOT EXISTS ${DB_NOMBRE} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
-    mariadb -e "CREATE USER IF NOT EXISTS '${DB_USUARIO}'@'localhost' IDENTIFIED BY '${clave}';"
-    mariadb -e "ALTER USER '${DB_USUARIO}'@'localhost' IDENTIFIED BY '${clave}';"
-    mariadb -e "GRANT ALL PRIVILEGES ON ${DB_NOMBRE}.* TO '${DB_USUARIO}'@'localhost'; FLUSH PRIVILEGES;"
+    # El usuario se crea para 'localhost' y para '127.0.0.1': el servidor se
+    # conecta por TCP a 127.0.0.1 y MariaDB los trata como orígenes distintos.
+    local origen
+    for origen in localhost 127.0.0.1; do
+        mariadb -e "CREATE USER IF NOT EXISTS '${DB_USUARIO}'@'${origen}' IDENTIFIED BY '${clave}';"
+        mariadb -e "ALTER USER '${DB_USUARIO}'@'${origen}' IDENTIFIED BY '${clave}';"
+        mariadb -e "GRANT ALL PRIVILEGES ON ${DB_NOMBRE}.* TO '${DB_USUARIO}'@'${origen}';"
+    done
+    mariadb -e "FLUSH PRIVILEGES;"
 
-    # El esquema se importa solo si la tabla 'users' no existe todavía.
-    local existe
-    existe="$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NOMBRE}' AND table_name='users';")"
-    if [[ "$existe" -eq 0 ]]; then
+    # Se comprueba que el usuario de Zabbix de verdad puede entrar a la base.
+    if ! MYSQL_PWD="$clave" mariadb -h127.0.0.1 -u"$DB_USUARIO" "$DB_NOMBRE" -e "SELECT 1;" >/dev/null 2>&1; then
+        falla "El usuario ${DB_USUARIO} no puede entrar a la base por 127.0.0.1. Revisa: systemctl status mariadb"
+    fi
+
+    # Estado del esquema: sin tablas se importa; con tablas pero sin 'dbversion'
+    # llena, una importación anterior quedó a medias y hay que correr 'reparar'.
+    local tablas dbver
+    tablas="$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NOMBRE}';")"
+    dbver="$(mariadb -N -e "SELECT COUNT(*) FROM ${DB_NOMBRE}.dbversion;" 2>/dev/null || echo 0)"
+    if [[ "$tablas" -eq 0 ]]; then
         log "Importando el esquema de Zabbix (tarda un par de minutos)..."
         mariadb -e "SET GLOBAL log_bin_trust_function_creators = 1;"
-        zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz \
-            | MYSQL_PWD="$clave" mariadb --default-character-set=utf8mb4 -u"$DB_USUARIO" "$DB_NOMBRE"
+        if ! zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz \
+            | MYSQL_PWD="$clave" mariadb --default-character-set=utf8mb4 -u"$DB_USUARIO" "$DB_NOMBRE"; then
+            mariadb -e "SET GLOBAL log_bin_trust_function_creators = 0;"
+            falla "La importación del esquema falló. Corre: sudo ./zabbix-admin.sh reparar"
+        fi
         mariadb -e "SET GLOBAL log_bin_trust_function_creators = 0;"
         CAMBIOS=1
+    elif [[ "$dbver" -eq 0 ]]; then
+        falla "El esquema de la base está incompleto (importación interrumpida). Corre: sudo ./zabbix-admin.sh reparar"
     else
         log "Esquema de Zabbix: ya importado."
     fi
 
     local conf="/etc/zabbix/zabbix_server.conf" reiniciar=0
+    # DBHost=127.0.0.1 fuerza la conexión por TCP y evita problemas con la ruta del socket.
+    fijar_param "$conf" DBHost 127.0.0.1;           reiniciar=$((reiniciar + PARAM_CAMBIO))
     fijar_param "$conf" DBName "$DB_NOMBRE";        reiniciar=$((reiniciar + PARAM_CAMBIO))
     fijar_param "$conf" DBUser "$DB_USUARIO";       reiniciar=$((reiniciar + PARAM_CAMBIO))
     fijar_param "$conf" DBPassword "$clave";        reiniciar=$((reiniciar + PARAM_CAMBIO))
@@ -282,9 +350,27 @@ fase_servidor() {
     fijar_param "$agconf" Hostname "$(hostname)";              reiniciar=$((reiniciar + PARAM_CAMBIO))
 
     systemctl enable zabbix-server zabbix-agent2 apache2 >>"$LOG" 2>&1
+    # Al instalar, apt intenta arrancar zabbix-server antes de que la base esté
+    # lista y lo deja marcado como "failed". Se limpia esa marca antes de arrancar.
+    systemctl reset-failed zabbix-server >>"$LOG" 2>&1 || true
+
     if [[ $reiniciar -gt 0 ]] || ! systemctl is-active --quiet zabbix-server; then
-        systemctl restart zabbix-server zabbix-agent2 apache2
-        log "Servicios de Zabbix reiniciados."
+        if ! systemctl restart zabbix-server; then
+            diagnostico
+            falla "zabbix-server no arrancó. La causa suele estar en el diagnóstico de arriba."
+        fi
+        sleep 3   # zabbix-server es un servicio "forking": si hay error se cae a los segundos
+        if ! systemctl is-active --quiet zabbix-server; then
+            diagnostico
+            falla "zabbix-server arrancó pero se cayó enseguida. Revisa el diagnóstico de arriba."
+        fi
+        log "zabbix-server activo."
+    fi
+    if [[ $reiniciar -gt 0 ]]; then
+        systemctl restart zabbix-agent2 apache2
+        log "zabbix-agent2 y apache2 reiniciados."
+    else
+        systemctl start zabbix-agent2 apache2
     fi
 
     log "Listo. Termina la configuración en el navegador: http://${ZBX_SERVER_IP}/zabbix"
@@ -339,7 +425,7 @@ fase_monitor() {
     fi
 
     escribir_si_cambia /etc/default/zbx-healthcheck 644 <<EOF
-# Generado por zabbix-setup.sh
+# Generado por zabbix-admin.sh
 SERVICIOS="${servicios}"
 NODOS="${nodos}"
 REVISAR_AGENTES="${revisar_agentes}"
@@ -457,8 +543,10 @@ case "${1:-}" in
     servidor)  necesita_root; fase_servidor ;;
     agente)    necesita_root; fase_agente ;;
     monitor)   necesita_root; fase_monitor "${2:-servidor}" ;;
+    diagnostico) diagnostico; exit 0 ;;
+    reparar)   necesita_root; reparar ;;
     estado)    estado; exit 0 ;;
-    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado}"; exit 1 ;;
+    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado|diagnostico|reparar}"; exit 1 ;;
 esac
 if [[ $CAMBIOS -eq 0 ]]; then
     log "Todo estaba ya aplicado: esta corrida no cambió nada."
