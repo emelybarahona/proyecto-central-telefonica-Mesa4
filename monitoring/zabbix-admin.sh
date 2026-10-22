@@ -18,8 +18,17 @@
 #   ./zabbix-admin.sh estado             # resumen de cómo quedó todo
 #   ./zabbix-admin.sh diagnostico        # muestra por qué no arranca zabbix-server
 #   ./zabbix-admin.sh reparar            # BORRA y vuelve a crear la base de datos de Zabbix
+#   ./zabbix-admin.sh idioma             # instala los idiomas (es_ES, en_US) para la web de Zabbix
+#   ./zabbix-admin.sh respaldo           # respaldo diario de la base (rotación + verificación + envío)
+#   ./zabbix-admin.sh restaurar-prueba   # prueba de restauración del último respaldo
 #
-# Orden recomendado en el servidor: hardening, servidor, firewall, monitor servidor.
+# PERMISOS: si al correr "./zabbix-admin.sh" sale "Permission denied", dale permiso de
+# ejecución una sola vez con:   chmod +x zabbix-admin.sh
+# (o córrelo así sin cambiar permisos:   sudo bash zabbix-admin.sh servidor).
+# Si lo bajas de GitHub el permiso se pierde; para que viaje con el repositorio:
+#   git update-index --chmod=+x zabbix-admin.sh && git commit -m "script ejecutable"
+#
+# Orden recomendado en el servidor: hardening, servidor (ya incluye idioma), firewall, respaldo, monitor servidor.
 # Orden recomendado en cada nodo:   hardening, agente, monitor nodo.
 #Al usar /usr/bin/env bash, el sistema busca cuál es la versión de Bash activa o #disponible en las rutas del usuario en ese #momento, lo que hace que el script #funcione en una mayor variedad de computadoras y sistemas tipo Unix por esa razón 
 # no utilizo #!/bin/bash
@@ -40,6 +49,12 @@ REDES_ADMIN="192.168.50.0/24 192.168.122.0/24 192.168.13.0/24"
 WG_PUERTO="443"
 UMBRAL_DISCO=90                      
 UMBRAL_MEMORIA=90                   
+# Respaldos de la base de datos (nodo 3 envía al nodo 4 de respaldo, 192.168.50.12)
+DIR_RESPALDOS="/var/backups/zabbix"
+RETENCION=7                          # cuántos respaldos se conservan en esta VM
+DESTINO_RESPALDO="192.168.50.12"
+USUARIO_DESTINO="zabbix"             # usuario en el nodo de respaldo
+RUTA_DESTINO="/var/backups/mesa4/zabbix"
 LOG="/var/log/zabbix-admin.log"
 CAMBIOS=0
 
@@ -285,6 +300,7 @@ fase_servidor() {
     asegurar_paquete zabbix-apache-conf
     asegurar_paquete zabbix-sql-scripts
     asegurar_paquete zabbix-agent2
+    asegurar_idiomas
 
     # La clave de la base se genera una sola vez y se guarda con permiso 600.
     if [[ ! -s "$ARCHIVO_CLAVE_DB" ]]; then
@@ -376,6 +392,8 @@ fase_servidor() {
     log "Listo. Termina la configuración en el navegador: http://${ZBX_SERVER_IP}/zabbix"
     log "La clave de la base está en $ARCHIVO_CLAVE_DB (el asistente web la pide)."
     log "Usuario web inicial: Admin / zabbix. Cámbiala al entrar."
+    log "IMPORTANTE: en la web, el host 'Zabbix server' debe llamarse '$(hostname)' (igual que el"
+    log "Hostname del agente). Si no, sale 'Zabbix agent is not available'. Ver Data collection > Hosts."
 }
 
 # Agente en los demás nodos
@@ -524,6 +542,158 @@ EOF
     log "Ver resultados: tail /var/log/zbx-healthcheck.log  o  journalctl -t zbx-healthcheck"
 }
 
+# Idiomas: la web de Zabbix solo ofrece un idioma si el sistema tiene ese "locale"
+# generado. Sin esto, elegir español en la web falla o la web no funciona bien.
+asegurar_idiomas() {
+    log "== Idiomas para la web de Zabbix =="
+    asegurar_paquete locales
+    local cambio=0 idioma
+    for idioma in es_ES.UTF-8 en_US.UTF-8; do
+        if locale -a | grep -qix "${idioma/UTF-8/utf8}"; then
+            log "Idioma $idioma: ya generado."
+        else
+            locale-gen "$idioma" >>"$LOG" 2>&1
+            log "Idioma $idioma: generado."
+            cambio=1
+            CAMBIOS=1
+        fi
+    done
+    # Apache tiene que reiniciarse para que PHP vea los idiomas nuevos.
+    if [[ $cambio -eq 1 ]] && systemctl is-active --quiet apache2; then
+        systemctl restart apache2
+        log "apache2 reiniciado para cargar los idiomas."
+    fi
+}
+
+# Respaldo: instala el script que vuelca la base, la comprime, verifica, rota y
+# envía al nodo de respaldo; y lo programa cada día con un systemd timer.
+fase_respaldo() {
+    log "== Respaldo automático de la base de datos =="
+    asegurar_paquete rsync
+    mkdir -p "$DIR_RESPALDOS" && chmod 700 "$DIR_RESPALDOS"
+
+    escribir_si_cambia /etc/default/zbx-backup 644 <<EOF
+# Generado por zabbix-admin.sh
+DIR_RESPALDOS=${DIR_RESPALDOS}
+RETENCION=${RETENCION}
+DB_NOMBRE=${DB_NOMBRE}
+DB_USUARIO=${DB_USUARIO}
+ARCHIVO_CLAVE_DB=${ARCHIVO_CLAVE_DB}
+DESTINO=${DESTINO_RESPALDO}
+USUARIO_DESTINO=${USUARIO_DESTINO}
+RUTA_DESTINO=${RUTA_DESTINO}
+ARCHIVO_LOG=/var/log/zbx-backup.log
+EOF
+
+    escribir_si_cambia /usr/local/bin/zbx-backup.sh 755 <<'EOF'
+#!/usr/bin/env bash
+# zbx-backup.sh - respaldo de la base de Zabbix: extraer, comprimir, verificar, rotar, enviar.
+set -euo pipefail
+source /etc/default/zbx-backup
+umask 077
+TAG="zbx-backup"
+fecha="$(date +%Y%m%d-%H%M%S)"
+archivo="${DIR_RESPALDOS}/zabbix-${fecha}.sql.gz"
+trap 'rm -f "${archivo}.tmp"' EXIT
+
+log() { logger -t "$TAG" "$*"; echo "$(date '+%F %T') $*" >> "$ARCHIVO_LOG"; }
+
+mkdir -p "$DIR_RESPALDOS"
+DUMP="$(command -v mariadb-dump || command -v mysqldump)"
+
+# 1) Extraer y comprimir (la clave va en una variable de entorno, no en la línea de comandos)
+MYSQL_PWD="$(cat "$ARCHIVO_CLAVE_DB")" "$DUMP" -h127.0.0.1 -u"$DB_USUARIO" \
+    --single-transaction --routines --triggers "$DB_NOMBRE" | gzip > "${archivo}.tmp"
+mv "${archivo}.tmp" "$archivo"
+
+# 2) Verificar integridad del comprimido y guardar su suma de control
+if gzip -t "$archivo"; then
+    sha256sum "$archivo" > "${archivo}.sha256"
+    log "Respaldo creado y verificado: $archivo ($(du -h "$archivo" | cut -f1))"
+else
+    rm -f "$archivo"
+    log "ERROR: el respaldo salió dañado y se descartó"
+    exit 1
+fi
+
+# 3) Rotación: se conservan solo los últimos RETENCION respaldos
+ls -1t "$DIR_RESPALDOS"/zabbix-*.sql.gz 2>/dev/null | tail -n +$((RETENCION + 1)) | while read -r viejo; do
+    rm -f "$viejo" "${viejo}.sha256"
+    log "Rotación: eliminado $viejo"
+done
+
+# 4) Envío al nodo de respaldo (si no hay conexión queda la copia local y se avisa)
+if ping -c1 -W2 "$DESTINO" >/dev/null 2>&1; then
+    if rsync -a -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+        "$archivo" "${archivo}.sha256" "${USUARIO_DESTINO}@${DESTINO}:${RUTA_DESTINO}/"; then
+        log "Respaldo enviado a ${DESTINO}:${RUTA_DESTINO}"
+    else
+        log "AVISO: no se pudo enviar a ${DESTINO} (revisa la llave SSH y la carpeta destino)"
+        exit 2
+    fi
+else
+    log "AVISO: ${DESTINO} no responde; el respaldo queda solo en esta VM"
+    exit 2
+fi
+EOF
+
+    escribir_si_cambia /etc/logrotate.d/zbx-backup 644 <<'EOF'
+/var/log/zbx-backup.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+}
+EOF
+
+    escribir_si_cambia /etc/systemd/system/zbx-backup.service 644 <<'EOF'
+[Unit]
+Description=Respaldo de la base de datos de Zabbix
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zbx-backup.sh
+EOF
+    local cambio_svc=$ARCHIVO_CAMBIO
+
+    escribir_si_cambia /etc/systemd/system/zbx-backup.timer 644 <<'EOF'
+[Unit]
+Description=Respaldo diario de Zabbix (02:00)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    if [[ $cambio_svc -eq 1 || $ARCHIVO_CAMBIO -eq 1 ]]; then
+        systemctl daemon-reload
+    fi
+    systemctl enable --now zbx-backup.timer >>"$LOG" 2>&1
+    log "Timer activo. Probar ya: sudo systemctl start zbx-backup.service  y luego  tail /var/log/zbx-backup.log"
+    log "Para enviar al nodo de respaldo hace falta copiar la llave de root: sudo ssh-copy-id ${USUARIO_DESTINO}@${DESTINO_RESPALDO}"
+}
+
+# Prueba de restauración: carga el último respaldo en una base temporal, cuenta
+# las tablas y la borra. Así queda demostrado que el respaldo sirve de verdad.
+restaurar_prueba() {
+    local ultimo tablas
+    ultimo="$(ls -1t "$DIR_RESPALDOS"/zabbix-*.sql.gz 2>/dev/null | head -1 || true)"
+    [[ -n "$ultimo" ]] || falla "No hay respaldos en $DIR_RESPALDOS. Crea uno con: sudo systemctl start zbx-backup.service"
+    (cd "$DIR_RESPALDOS" && sha256sum -c "$(basename "$ultimo").sha256") \
+        || falla "La suma de control no coincide: el respaldo está dañado."
+    mariadb -e "DROP DATABASE IF EXISTS zabbix_restore_test; CREATE DATABASE zabbix_restore_test CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
+    if ! zcat "$ultimo" | mariadb --default-character-set=utf8mb4 zabbix_restore_test; then
+        mariadb -e "DROP DATABASE IF EXISTS zabbix_restore_test;"
+        falla "La restauración de prueba falló."
+    fi
+    tablas="$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='zabbix_restore_test';")"
+    mariadb -e "DROP DATABASE zabbix_restore_test;"
+    log "Prueba de restauración correcta con $(basename "$ultimo"): ${tablas} tablas recuperadas."
+}
+
 estado() {
     echo "--- Servicios:"
     for s in ssh fail2ban mariadb apache2 zabbix-server zabbix-agent2 zbx-healthcheck.timer; do
@@ -543,10 +713,13 @@ case "${1:-}" in
     servidor)  necesita_root; fase_servidor ;;
     agente)    necesita_root; fase_agente ;;
     monitor)   necesita_root; fase_monitor "${2:-servidor}" ;;
+    idioma)    necesita_root; asegurar_idiomas ;;
+    respaldo)  necesita_root; fase_respaldo ;;
+    restaurar-prueba) necesita_root; restaurar_prueba ;;
     diagnostico) diagnostico; exit 0 ;;
     reparar)   necesita_root; reparar ;;
     estado)    estado; exit 0 ;;
-    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado|diagnostico|reparar}"; exit 1 ;;
+    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado|diagnostico|reparar|idioma|respaldo|restaurar-prueba}"; exit 1 ;;
 esac
 if [[ $CAMBIOS -eq 0 ]]; then
     log "Todo estaba ya aplicado: esta corrida no cambió nada."
