@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guía de laboratorio: Pasarelas Zentyal (Mesa 4)</title>
+<style>
+:root{--bg:#fff;--fg:#202124;--mute:#5f6368;--card:#f8f9fa;--line:#dadce0;--ac:#1a73e8;--code:#202124;--codefg:#e8eaed;--warn:#fef7e0;--ok:#e6f4ea}
+@media (prefers-color-scheme:dark){:root{--bg:#202124;--fg:#e8eaed;--mute:#9aa0a6;--card:#2b2c2f;--line:#3c4043;--ac:#8ab4f8;--code:#121212;--codefg:#e8eaed;--warn:#3a3320;--ok:#1f3326}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.6 system-ui,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+header{padding:28px 20px 16px;max-width:1000px;margin:auto}
+h1{font-size:26px;margin:0 0 4px;font-weight:500}
+header p{margin:4px 0;color:var(--mute)}
+.wrap{display:flex;gap:24px;max-width:1000px;margin:auto;padding:0 20px 60px}
+nav{width:230px;flex-shrink:0;position:sticky;top:12px;align-self:flex-start;max-height:90vh;overflow:auto;font-size:14px}
+nav a{display:block;padding:6px 10px;color:var(--mute);text-decoration:none;border-radius:6px}
+nav a:hover{background:var(--card);color:var(--fg)}
+nav a.done{text-decoration:line-through;opacity:.6}
+main{flex:1;min-width:0}
+#q{width:100%;padding:12px 16px;font-size:16px;border:1px solid var(--line);border-radius:24px;background:var(--bg);color:var(--fg);margin-bottom:6px}
+#prog{font-size:13px;color:var(--mute);margin:0 0 14px 6px}
+.step{border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 16px;background:var(--bg)}
+.step h2{font-size:19px;margin:0 0 4px;font-weight:500;color:var(--ac)}
+.step h2 label{cursor:pointer}
+.tag{font-size:12px;color:var(--mute);margin-bottom:8px}
+.why{background:var(--card);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:15px}
+.step ol{padding-left:22px}
+.step li{margin:5px 0}
+.code{position:relative;margin:10px 0}
+.code pre{margin:0;background:var(--code);color:var(--codefg);padding:12px 70px 12px 14px;border-radius:8px;overflow-x:auto;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
+.code button{position:absolute;top:8px;right:8px;font-size:12px;padding:3px 9px;border:1px solid #5f6368;border-radius:12px;background:transparent;color:#e8eaed;cursor:pointer}
+.ver{background:var(--ok);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:15px}
+.fail{background:var(--warn);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:15px}
+.gl dt{font-weight:600;margin-top:10px}
+.gl dd{margin:0;color:var(--mute)}
+.note{border-left:4px solid var(--ac);background:var(--card);padding:10px 14px;margin:0 0 18px;border-radius:0 8px 8px 0;font-size:15px}
+.hide{display:none}
+@media(max-width:760px){.wrap{flex-direction:column}nav{position:static;width:auto;max-height:none}}
+@media print{nav,#q,.code button{display:none}.step{break-inside:avoid}}
+</style>
+</head>
+<body>
+<header>
+<h1>Pasarelas Zentyal: guía paso a paso</h1>
+<p>Módulo 3.8 · Mesa 4 · Rol: Infraestructura de Pasarelas (PC18, 192.168.50.1 y secundaria 192.168.50.2)</p>
+</header>
+<div class="wrap">
+<nav id="nav"></nav>
+<main>
+<div class="note">
+<b>Cómo usar esta guía.</b> Va en orden. Marca el cuadrito de cada paso cuando lo termines (se guarda en este navegador). Los bloques negros son comandos: el botón <i>Copiar</i> los copia y los pegas en la terminal. El símbolo $ nunca se escribe. Los nombres de los menús de Zentyal pueden variar un poco según la versión; si uno no coincide, busca el más parecido. Esta guía es de apoyo para estudiar y practicar: entiende cada paso, porque en la defensa te piden demostrarlo en vivo.
+</div>
+<input id="q" type="search" placeholder="Buscar en la guía (por ejemplo: DHCP, ping, 8443, failover)...">
+<p id="prog"></p>
+<div id="steps"></div>
+<h2 style="font-weight:500">Glosario rápido</h2>
+<dl class="gl">
+<dt>Gateway (puerta de enlace)</dt><dd>El equipo por el que sale el tráfico de la red hacia otras redes o internet. Aquí es 192.168.50.1.</dd>
+<dt>NAT</dt><dd>Hace que todos los equipos de la red interna salgan a internet compartiendo la IP externa de la pasarela.</dd>
+<dt>DHCP</dt><dd>Reparte IPs automáticamente a los equipos que se conectan.</dd>
+<dt>DNS</dt><dd>Traduce nombres (google.com) a direcciones IP.</dd>
+<dt>Failover</dt><dd>Que la pasarela secundaria tome el trabajo cuando la primaria deja de responder.</dd>
+<dt>Idempotente</dt><dd>Que un script se pueda correr muchas veces y, si ya estaba todo hecho, no cambie nada.</dd>
+</dl>
+</main>
+</div>
+<script>
+const S=[
+{t:"Antes de salir de casa",tag:"Preparación",why:"Si llegas sin estos archivos pierdes el tiempo del laboratorio.",
+ p:["Copia a una USB el archivo <b>gateway-setup.sh</b> y esta guía.","Descarga la ISO de Zentyal solo si el profe no la da, y pregúntale <b>qué versión</b> quiere que usen.","Lleva cuaderno o celular para tomar capturas de cada prueba: las necesitas para el manual técnico.","Si puedes, prueba antes el script en una VM de Ubuntu con <b>MODO=manual</b> para ver que corre sin errores."],
+ f:"Si la VM de práctica no tiene salida a internet, revisa que el adaptador de red esté en NAT."},
+{t:"Instalar Zentyal en PC18",tag:"Pasarela primaria",why:"'Modo consola' significa instalar sin entorno gráfico. El servidor se administra desde otra PC por el navegador.",
+ p:["Arranca la PC desde la ISO o la USB de Zentyal.","Elige la instalación sin entorno gráfico.","Crea el usuario administrador y anota usuario y contraseña en tu cuaderno.","Al terminar reinicia e inicia sesión en la terminal."],
+ v:"Ves una terminal negra pidiendo usuario y contraseña, sin escritorio.",f:"Si la instalación te pide entorno gráfico, vuelve atrás y busca la opción sin él, o pregunta al profe qué ISO usar."},
+{t:"Ver cómo se llaman las tarjetas de red",tag:"Terminal de PC18",why:"El script y Zentyal necesitan saber cuál tarjeta es la interna y cuál sale a internet.",
+ c:["ip -br a"],p:["Corre el comando y mira la lista.","Apunta el nombre de la tarjeta que va al switch del laboratorio (interna) y la que sale a internet (externa). Suelen llamarse enp3s0, enp2s0 o eth0."],
+ v:"Una línea por tarjeta, con su nombre, estado (UP/DOWN) y su IP si tiene.",f:"Si solo aparece una tarjeta, una pasarela necesita dos. Dile al profe: puede darte un adaptador USB o decirte cómo hacerlo con una sola."},
+{t:"Pasar y correr el script",tag:"Terminal de PC18",why:"El script deja listo el sistema: zona horaria, reenvío de paquetes y registro de lo que hace. Cada paso revisa antes si ya estaba hecho.",
+ c:["ls -l gateway-setup.sh","chmod +x gateway-setup.sh","sudo LAN_IFACE=enp3s0 ./gateway-setup.sh primaria","sudo LAN_IFACE=enp3s0 ./gateway-setup.sh primaria","./gateway-setup.sh estado"],
+ p:["Copia el script a la home de tu usuario (USB o scp).","Cambia <b>enp3s0</b> por el nombre real de tu tarjeta interna (paso anterior).","Lee lo que imprime: al final da una lista de valores para el panel.","Córrelo una <b>segunda vez</b>. Debe decir que no cambió nada: eso demuestra que es idempotente.","Guarda captura de las dos corridas."],
+ v:"En la segunda corrida aparecen mensajes 'sin cambios' o 'ya estaba'. El reenvío de paquetes sale en 1.",f:"Si dice 'Zentyal no está instalado', vuelve al paso 2. Si dice 'Corre con sudo', falta el sudo. El registro completo está en /var/log/gateway-setup.log."},
+{t:"Entrar al panel web de Zentyal",tag:"Otra PC con Chrome o Chromium",why:"Aunque el servidor no tenga escritorio, Zentyal se configura desde un navegador en el puerto 8443.",
+ p:["En el servidor mira su IP con ip -br a.","En otra PC de la misma red abre Chrome/Chromium y escribe https://IP-DEL-SERVIDOR:8443","Sale una advertencia de certificado: es normal. Pulsa Avanzado y luego Continuar.","Entra con el usuario y contraseña del paso 2.","Si aparece un asistente inicial, sáltalo si te deja: configurarás todo a mano."],
+ v:"Se abre el panel de Zentyal con un menú a la izquierda.",f:"Si no abre: revisa que sea https (no http), el puerto 8443 y que ambas PCs estén en la misma red. Prueba ping a la IP del servidor."},
+{t:"Activar los módulos",tag:"Panel: Estado de los módulos",why:"Zentyal funciona por módulos. Si no los activas, sus menús no hacen nada.",
+ p:["Abre <b>Estado de los módulos</b>.","Activa Red, Cortafuegos, DHCP y DNS.","Pulsa <b>Guardar cambios</b> (botón arriba a la derecha). Sin esto Zentyal no aplica nada."],
+ v:"Los módulos aparecen con la casilla marcada y el botón de guardar queda sin cambios pendientes.",f:"Si un módulo no se deja activar, suele faltar activar antes otro del que depende (Red es la base)."},
+{t:"Configurar las interfaces",tag:"Panel: Red > Interfaces",why:"Aquí se define qué tarjeta es la interna y cuál la externa. Marcar una como externa es lo que activa el NAT.",
+ p:["Elige la tarjeta interna: método <b>Estático</b>, sin marcar 'Externa', IP <b>192.168.50.1</b>, máscara 255.255.255.0.","Elige la tarjeta que sale a internet: método <b>DHCP</b> (o estático si el profe te da datos) y marca <b>Externa</b>.","Guarda cambios."],
+ v:"En el servidor, ip -br a muestra 192.168.50.1/24 en la tarjeta interna.",f:"Si pierdes la conexión al panel, es porque cambiaste la IP desde la que estabas entrando. Entra otra vez con la nueva."},
+{t:"Puerta de enlace",tag:"Panel: Red > Puertas de enlace",why:"Es la salida hacia internet de la propia pasarela.",
+ p:["Revisa que aparezca una puerta de enlace en la interfaz externa.","Si no está, agrégala con la IP que te dé el profe o el router de la escuela.","Guarda cambios."],
+ c:["ip route"],v:"Hay una línea que empieza con 'default via' con la IP del router.",f:"Sin esa línea no habrá internet para nadie."},
+{t:"Configurar DHCP",tag:"Panel: Infraestructura > DHCP",why:"Reparte IPs a los equipos de la red interna.",
+ p:["Elige la interfaz interna.","Rango: de <b>192.168.50.100</b> a <b>192.168.50.200</b>.","Puerta de enlace: <b>192.168.50.1</b>.","Guarda cambios."],
+ v:"El servicio DHCP aparece activo.",f:"Si un cliente no recibe IP, revisa que esté en la misma red física y que la interfaz esté bien elegida."},
+{t:"Configurar DNS",tag:"Panel: Infraestructura > DNS",why:"Permite que los equipos usen nombres en vez de IPs.",
+ p:["Agrega un reenviador, por ejemplo <b>8.8.8.8</b>.","Guarda cambios."],
+ v:"Desde un cliente, ping google.com resuelve a una IP.",f:"Si ping a 8.8.8.8 funciona pero google.com no, el problema es el DNS."},
+{t:"Cortafuegos",tag:"Panel: Cortafuegos > Filtrado de paquetes",why:"Define qué tráfico puede entrar y salir. Para el proyecto basta con reglas mínimas bien documentadas.",
+ p:["Permite el tráfico desde la red interna (192.168.50.0/24) hacia afuera.","Permite SSH solo desde 192.168.50.0/24.","Anota cada regla que dejes: va en el manual técnico.","Guarda cambios."],
+ f:"Si te bloqueas el acceso al panel, revisa las reglas hacia el puerto 8443 desde la red interna."},
+{t:"Probar la pasarela primaria",tag:"Cliente (otra PC o VM en la red)",why:"Una configuración sin prueba no cuenta. Estas cuatro pruebas van en el manual con captura.",
+ c:["ip -br a","ping -c 3 192.168.50.1","ping -c 3 8.8.8.8","ping -c 3 google.com"],
+ p:["Conecta un equipo a la red interna.","Corre los cuatro comandos en orden.","Toma captura de cada resultado."],
+ v:"IP dentro de 192.168.50.100-200 y respuestas en los tres ping.",f:"Falla el segundo: red interna o IP mal. Falla el tercero: NAT, interfaz externa o puerta de enlace. Falla solo el cuarto: DNS. Casi siempre es una casilla 'Externa' mal o cambios sin guardar."},
+{t:"Armar la pasarela secundaria",tag:"Segunda PC (192.168.50.2)",why:"Es el respaldo: si la primaria cae, toma su IP.",
+ c:["sudo LAN_IFACE=enp3s0 ./gateway-setup.sh secundaria"],
+ p:["Instala Zentyal igual que en el paso 2.","Corre el script con <b>secundaria</b> (cambia el nombre de la tarjeta).","Repite los pasos del panel con IP <b>192.168.50.2</b>.","En DHCP no lo actives, o usa un rango distinto (192.168.50.201 a 250) para que no se pisen."],
+ v:"El timer de failover aparece activo en el comando estado.",f:"Pregunta al equipo si el .1 vive en WireGuard o en la red física: el failover puede no funcionar dentro del túnel."},
+{t:"Probar el failover",tag:"Primaria y secundaria",why:"Es la prueba más vistosa para la defensa: se apaga la primaria y la secundaria toma el control.",
+ c:["ip -br a","journalctl -t gw-failover -n 20","sudo ./gateway-setup.sh liberar"],
+ p:["Apaga la primaria.","Espera unos 30 segundos.","En la secundaria corre los dos primeros comandos.","Cuando vuelvas a encender la primaria, corre el último comando en la secundaria para que suelte el .1."],
+ v:"192.168.50.1 aparece en la secundaria y el registro muestra los intentos fallidos y el mensaje FAILOVER.",f:"Si no pasa, anótalo como limitación (por ejemplo por WireGuard) y documenta qué probaste. Eso también vale."},
+{t:"Evidencias para el manual",tag:"Documentación",why:"La rúbrica pide manual técnico y de usuario. Mientras lo haces es más fácil que después.",
+ p:["Capturas de las dos corridas del script.","Capturas de cada módulo configurado en el panel.","Captura de las cuatro pruebas del cliente.","Captura del failover.","Lista de reglas del cortafuegos y problemas que encontraste y cómo los resolviste.","Sube lo necesario al repositorio Git del equipo."]}
+];
+const $=s=>document.querySelector(s);
+let hecho={};
+try{hecho=JSON.parse(localStorage.getItem("guiaGW")||"{}")}catch(e){}
+function guardar(){try{localStorage.setItem("guiaGW",JSON.stringify(hecho))}catch(e){}}
+function progreso(){const n=S.filter((_,i)=>hecho[i]).length;$("#prog").textContent=n+" de "+S.length+" pasos completados";
+ document.querySelectorAll("nav a").forEach((a,i)=>a.classList.toggle("done",!!hecho[i]));}
+function bloque(cls,titulo,txt){const d=document.createElement("div");d.className=cls;d.innerHTML="<b>"+titulo+"</b> "+txt;return d;}
+S.forEach((s,i)=>{
+ const el=document.createElement("section");el.className="step";el.id="p"+i;
+ const h=document.createElement("h2");
+ const lb=document.createElement("label");
+ const cb=document.createElement("input");cb.type="checkbox";cb.checked=!!hecho[i];
+ cb.onchange=()=>{hecho[i]=cb.checked;guardar();progreso()};
+ lb.append(cb," Paso "+i+": "+s.t);h.append(lb);el.append(h);
+ const tg=document.createElement("div");tg.className="tag";tg.textContent=s.tag;el.append(tg);
+ el.append(bloque("why","Para qué sirve:",s.why));
+ if(s.p){const ol=document.createElement("ol");s.p.forEach(x=>{const li=document.createElement("li");li.innerHTML=x;ol.append(li)});el.append(ol)}
+ (s.c||[]).forEach(cmd=>{const w=document.createElement("div");w.className="code";
+  const pre=document.createElement("pre");pre.textContent="$ "+cmd;
+  const b=document.createElement("button");b.textContent="Copiar";
+  b.onclick=()=>{const ok=()=>{b.textContent="Copiado";setTimeout(()=>b.textContent="Copiar",1200)};
+   if(navigator.clipboard){navigator.clipboard.writeText(cmd).then(ok,()=>{})}};
+  w.append(pre,b);el.append(w)});
+ if(s.v)el.append(bloque("ver","Qué debes ver:",s.v));
+ if(s.f)el.append(bloque("fail","Si falla:",s.f));
+ $("#steps").append(el);
+ const a=document.createElement("a");a.href="#p"+i;a.textContent=i+". "+s.t;$("#nav").append(a);
+});
+$("#q").oninput=e=>{const t=e.target.value.toLowerCase();
+ document.querySelectorAll(".step").forEach(x=>x.classList.toggle("hide",t&&!x.textContent.toLowerCase().includes(t)))};
+progreso();
+</script>
+</body>
+</html>
