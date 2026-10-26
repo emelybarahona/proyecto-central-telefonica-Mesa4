@@ -18,3 +18,11 @@ La infraestructura consta de 5 nodos (físicos y virtualizados) distribuidos en 
 | **Nodo 3** | Ubuntu Server 24.04 | VM (KVM/QEMU) | Servidor Zabbix | 192.168.14.51 |
 | **Nodo 4** | Ubuntu Server 24.04 | VM (KVM/QEMU) | Respaldos | 192.168.14. |
 | **Nodo 5** | Ubuntu Server + Zentyal | PC Real | Pasarela Secundaria | 192.168.14.252 |
+
+## Hardening y Seguridad<br>
+Todos los nodos son endurecidos para mitigar ataques comunes.  
+
+- Autenticación mediante llave única criptográfica.
+- Desabilitación del login como usuario root y acceso por contraseña.
+- Bloqueo automático de IPs tras 3 intentos fallidos.
+- Restricción de reenvío de puertos y túneles no autorizados.
