@@ -12,7 +12,7 @@
 #   ./zabbix-admin.sh hardening          # SSH por llave + fail2ban (cualquier nodo)
 #   ./zabbix-admin.sh firewall           # reglas iptables del servidor (política DROP)
 #   ./zabbix-admin.sh servidor           # INSTALA Zabbix server + MariaDB + web + agente
-#   ./zabbix-admin.sh agente             # Agente Zabbix (los demás nodos)
+#   ./zabbix-admin.sh agente [IP-DEL-SERVIDOR]   # Agente Zabbix (solo en los OTROS nodos, no en la VM del servidor)
 #   ./zabbix-admin.sh monitor servidor   # script de monitoreo + systemd timer
 #   ./zabbix-admin.sh monitor nodo       # igual, pero para un nodo normal
 #   ./zabbix-admin.sh estado             # resumen de cómo quedó todo
@@ -21,6 +21,11 @@
 #   ./zabbix-admin.sh idioma             # instala los idiomas (es_ES, en_US) para la web de Zabbix
 #   ./zabbix-admin.sh respaldo           # respaldo diario de la base (rotación + verificación + envío)
 #   ./zabbix-admin.sh restaurar-prueba   # prueba de restauración del último respaldo
+#   ./zabbix-admin.sh red                # revisa la red: IP, puerta de enlace, internet y nodos
+#   ./zabbix-admin.sh sin-vpn            # quita WireGuard (ya no se usa) y sus llaves
+#
+# RED: ya no se usa VPN. La VM va en modo puente y todos los equipos están en la red real
+# 192.168.14.0/24 (ver la guía del puente). Las IP están en el bloque "Parámetros" de abajo.
 #
 # PERMISOS: si al correr "./zabbix-admin.sh" sale "Permission denied", dale permiso de
 # ejecución una sola vez con:   chmod +x zabbix-admin.sh
@@ -38,22 +43,21 @@ set -euo pipefail
 
 #Párametros del proyecto
 ZBX_VERSION="7.0"                   
-ZBX_SERVER_IP="192.168.50.11"        
-NODOS="192.168.50.10 192.168.50.12"  
+ZBX_SERVER_IP="${ZBX_SERVER_IP:-192.168.14.51}"   # IP de la VM de Zabbix en el puente (red real)
+GATEWAY_IP="192.168.14.252"                    # pasarela Zentyal (salida a internet)
+NODOS="192.168.14.50 192.168.14.2"   # VM de la PC17 (Asterisk) y VM de la PC19 (respaldo)
 DB_NOMBRE="zabbix"
 DB_USUARIO="zabbix"
 ARCHIVO_CLAVE_DB="/root/.zabbix-db-pass"   
-# Redes desde donde se permite SSH y la web: WireGuard, red de las VM (libvirt) y el Wi-Fi.
-REDES_ADMIN="192.168.50.0/24 192.168.122.0/24 192.168.13.0/24"
-# Puerto UDP donde escucha WireGuard (el ListenPort de wg0.conf). Antes 51820, ahora 443.
-WG_PUERTO="443"
+# Redes desde donde se permite SSH y la web de Zabbix: la red real (puente) y la red libvirt por si la VM aún está en NAT.
+REDES_ADMIN="192.168.14.0/24 192.168.122.0/24"
 UMBRAL_DISCO=90                      
 UMBRAL_MEMORIA=90                   
-# Respaldos de la base de datos (nodo 3 envía al nodo 4 de respaldo, 192.168.50.12)
+# Respaldos de la base de datos (esta VM envía al nodo de respaldo: la VM de la PC19)
 DIR_RESPALDOS="/var/backups/zabbix"
 RETENCION=7                          # cuántos respaldos se conservan en esta VM
-DESTINO_RESPALDO="192.168.50.12"
-USUARIO_DESTINO="zabbix"             # usuario en el nodo de respaldo
+DESTINO_RESPALDO="192.168.14.2"
+USUARIO_DESTINO="zabbix"             # usuario en el nodo de respaldo (ajústalo si es otro)
 RUTA_DESTINO="/var/backups/mesa4/zabbix"
 LOG="/var/log/zabbix-admin.log"
 CAMBIOS=0
@@ -215,6 +219,15 @@ regla_iptables() {
     fi
 }
 
+# Borra una regla de INPUT solo si existe (sirve para limpiar reglas de la VPN vieja).
+borrar_regla_si_existe() {
+    if iptables -C INPUT "$@" 2>/dev/null; then
+        iptables -D INPUT "$@"
+        log "iptables: regla vieja eliminada ($*)"
+        CAMBIOS=1
+    fi
+}
+
 fase_firewall() {
     log "== Firewall del servidor Zabbix (iptables) =="
     # IMPORTANTE: deja abierta otra sesión SSH mientras corres esto. Primero se
@@ -227,20 +240,22 @@ fase_firewall() {
     regla_iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     regla_iptables -A INPUT -p icmp -j ACCEPT
 
-    # SSH y la web de Zabbix solo desde las redes de administración.
+    # SSH, web de Zabbix y puerto 10051 (agentes activos) solo desde las redes permitidas.
     for red in $REDES_ADMIN; do
         regla_iptables -A INPUT -s "$red" -p tcp --dport 22 -j ACCEPT
         regla_iptables -A INPUT -s "$red" -p tcp --dport 80 -j ACCEPT
+        regla_iptables -A INPUT -s "$red" -p tcp --dport 10051 -j ACCEPT
     done
-    # Túnel WireGuard y puerto del servidor Zabbix (agentes activos) desde la VPN.
-    regla_iptables -A INPUT -p udp --dport "$WG_PUERTO" -j ACCEPT
-    # Si el puerto de WireGuard cambió, se quita la regla vieja del 51820 para no dejarlo abierto.
-    if [[ "$WG_PUERTO" != "51820" ]] && iptables -C INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null; then
-        iptables -D INPUT -p udp --dport 51820 -j ACCEPT
-        log "iptables: regla vieja del puerto 51820 eliminada"
-        CAMBIOS=1
-    fi
-    regla_iptables -A INPUT -s 192.168.50.0/24 -p tcp --dport 10051 -j ACCEPT
+
+    # Limpieza: reglas que dejó la VPN (WireGuard por 51820 o 443) y las redes 192.168.50.x y Wi-Fi.
+    borrar_regla_si_existe -p udp --dport 443 -j ACCEPT
+    borrar_regla_si_existe -p udp --dport 51820 -j ACCEPT
+    local red_vieja puerto
+    for red_vieja in 192.168.50.0/24 192.168.13.0/24; do
+        for puerto in 22 80 10051; do
+            borrar_regla_si_existe -s "$red_vieja" -p tcp --dport "$puerto" -j ACCEPT
+        done
+    done
 
     # Todo lo demás que entra se descarta.
     if [[ "$(iptables -S INPUT | head -1)" != "-P INPUT DROP" ]]; then
@@ -291,6 +306,10 @@ reparar() {
 # Servidor de Zabbix
 fase_servidor() {
     log "== Servidor Zabbix + MariaDB =="
+    # La IP que usarán los agentes tiene que ser la de ESTA VM. Si todavía no tiene el puente, avisa.
+    if ! hostname -I | tr ' ' '\n' | grep -qx "$ZBX_SERVER_IP"; then
+        aviso "Esta VM no tiene la IP ${ZBX_SERVER_IP} (tiene: $(hostname -I)). Si ya hiciste el puente, revisa el netplan; si no, puedes seguir."
+    fi
     apt-get update >>"$LOG" 2>&1
     asegurar_paquete wget
     asegurar_paquete mariadb-server
@@ -694,6 +713,65 @@ restaurar_prueba() {
     log "Prueba de restauración correcta con $(basename "$ultimo"): ${tablas} tablas recuperadas."
 }
 
+# Revisa la red paso a paso: ayuda a saber si el problema es la IP, la pasarela, internet o un nodo.
+revisar_red() {
+    echo "--- Direcciones IP de esta máquina:"
+    ip -4 -br addr show | grep -v '^lo' || true
+    echo "--- Ruta por defecto (debe salir por ${GATEWAY_IP}):"
+    ip route show default || true
+    echo "--- Pruebas (ping):"
+    local entrada destino nombre n
+    local lista=("${GATEWAY_IP}|pasarela Zentyal" "8.8.8.8|internet")
+    for n in $NODOS; do lista+=("${n}|nodo"); done
+    for entrada in "${lista[@]}"; do
+        destino="${entrada%%|*}"; nombre="${entrada#*|}"
+        if ping -c1 -W2 "$destino" >/dev/null 2>&1; then
+            printf '  %-16s %-16s responde\n' "$destino" "($nombre)"
+        else
+            printf '  %-16s %-16s NO responde\n' "$destino" "($nombre)"
+        fi
+    done
+    echo "--- Puerto 10050 (agente) de cada nodo:"
+    for destino in $NODOS; do
+        if timeout 3 bash -c "exec 3<>/dev/tcp/${destino}/10050" 2>/dev/null; then
+            printf '  %-16s agente responde\n' "$destino"
+        else
+            printf '  %-16s agente NO responde (¿instalado? ¿firewall?)\n' "$destino"
+        fi
+    done
+}
+
+# Quita WireGuard: el equipo decidió no usar VPN, así que se apaga, se desinstala y se borran sus llaves.
+quitar_vpn() {
+    log "== Quitar WireGuard (ya no se usa) =="
+    if systemctl is-enabled --quiet wg-quick@wg0 2>/dev/null || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        systemctl disable --now wg-quick@wg0 >>"$LOG" 2>&1 || true
+        log "Servicio wg-quick@wg0 detenido y deshabilitado."
+        CAMBIOS=1
+    else
+        log "wg-quick@wg0: ya estaba apagado."
+    fi
+    if ip link show wg0 >/dev/null 2>&1; then
+        ip link delete wg0 >>"$LOG" 2>&1 || true
+        log "Interfaz wg0 eliminada."
+        CAMBIOS=1
+    fi
+    if dpkg -s wireguard >/dev/null 2>&1 || dpkg -s wireguard-tools >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y wireguard wireguard-tools >>"$LOG" 2>&1 || true
+        apt-get autoremove -y >>"$LOG" 2>&1 || true
+        log "WireGuard desinstalado."
+        CAMBIOS=1
+    else
+        log "WireGuard: ya estaba desinstalado."
+    fi
+    if [[ -d /etc/wireguard ]]; then
+        rm -rf /etc/wireguard
+        log "Carpeta /etc/wireguard (con las llaves) eliminada."
+        CAMBIOS=1
+    fi
+    log "Para limpiar también las reglas de firewall de la VPN: sudo ./zabbix-admin.sh firewall"
+}
+
 estado() {
     echo "--- Servicios:"
     for s in ssh fail2ban mariadb apache2 zabbix-server zabbix-agent2 zbx-healthcheck.timer; do
@@ -711,15 +789,17 @@ case "${1:-}" in
     hardening) necesita_root; fase_hardening ;;
     firewall)  necesita_root; fase_firewall ;;
     servidor)  necesita_root; fase_servidor ;;
-    agente)    necesita_root; fase_agente ;;
-    monitor)   necesita_root; fase_monitor "${2:-servidor}" ;;
+    agente)    necesita_root; [[ -n "${2:-}" ]] && ZBX_SERVER_IP="$2"; fase_agente ;;
+    monitor)   necesita_root; [[ -n "${3:-}" ]] && ZBX_SERVER_IP="$3"; fase_monitor "${2:-servidor}" ;;
+    red)       revisar_red; exit 0 ;;
+    sin-vpn)   necesita_root; quitar_vpn ;;
     idioma)    necesita_root; asegurar_idiomas ;;
     respaldo)  necesita_root; fase_respaldo ;;
     restaurar-prueba) necesita_root; restaurar_prueba ;;
     diagnostico) diagnostico; exit 0 ;;
     reparar)   necesita_root; reparar ;;
     estado)    estado; exit 0 ;;
-    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado|diagnostico|reparar|idioma|respaldo|restaurar-prueba}"; exit 1 ;;
+    *) echo "Uso: sudo $0 {hardening|firewall|servidor|agente|monitor [servidor|nodo]|estado|diagnostico|reparar|idioma|respaldo|restaurar-prueba|red|sin-vpn}"; exit 1 ;;
 esac
 if [[ $CAMBIOS -eq 0 ]]; then
     log "Todo estaba ya aplicado: esta corrida no cambió nada."
