@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# zabbix-admin.sh  -  Mesa 4  -  Módulo 3.8
+# zabbix-admin2.sh  -  Mesa 4  -  Módulo 3.8
 # Responsable:(PC18)  -  Rol: Monitoreo y Seguridad (Zabbix)
 #
 # Qué hace
@@ -9,30 +9,30 @@
 #   veces que haga falta (por ejemplo, después de mejorar el script).
 #
 # Uso (siempre con sudo)
-#   ./zabbix-admin.sh                    # SIN parámetros: abre un MENÚ y pregunta las IP (lo más fácil)
-#   ./zabbix-admin.sh hardening          # SSH por llave + fail2ban (cualquier nodo)
-#   ./zabbix-admin.sh firewall           # reglas iptables del servidor (política DROP)
-#   ./zabbix-admin.sh servidor           # INSTALA Zabbix server + MariaDB + web + agente
-#   ./zabbix-admin.sh agente [IP-DEL-SERVIDOR]   # Agente Zabbix (solo en los OTROS nodos, no en la VM del servidor)
-#   ./zabbix-admin.sh monitor servidor   # script de monitoreo + systemd timer
-#   ./zabbix-admin.sh monitor nodo       # igual, pero para un nodo normal
-#   ./zabbix-admin.sh estado             # resumen de cómo quedó todo
-#   ./zabbix-admin.sh diagnostico        # muestra por qué no arranca zabbix-server
-#   ./zabbix-admin.sh reparar            # BORRA y vuelve a crear la base de datos de Zabbix
-#   ./zabbix-admin.sh idioma             # instala los idiomas (es_ES, en_US) para la web de Zabbix
-#   ./zabbix-admin.sh respaldo           # respaldo diario de la base (rotación + verificación + envío)
-#   ./zabbix-admin.sh restaurar-prueba   # prueba de restauración del último respaldo
-#   ./zabbix-admin.sh red                # revisa la red: IP, puerta de enlace, internet y nodos
-#   ./zabbix-admin.sh sin-vpn            # quita WireGuard (ya no se usa) y sus llaves
+#   ./zabbix-admin2.sh                    # SIN parámetros: abre un MENÚ y pregunta las IP (lo más fácil)
+#   ./zabbix-admin2.sh hardening          # SSH por llave + fail2ban (cualquier nodo)
+#   ./zabbix-admin2.sh firewall           # reglas iptables del servidor (política DROP)
+#   ./zabbix-admin2.sh servidor           # INSTALA Zabbix server + MariaDB + web + agente
+#   ./zabbix-admin2.sh agente [IP-DEL-SERVIDOR]   # Agente Zabbix (solo en los OTROS nodos, no en la VM del servidor)
+#   ./zabbix-admin2.sh monitor servidor   # script de monitoreo + systemd timer
+#   ./zabbix-admin2.sh monitor nodo       # igual, pero para un nodo normal
+#   ./zabbix-admin2.sh estado             # resumen de cómo quedó todo
+#   ./zabbix-admin2.sh diagnostico        # muestra por qué no arranca zabbix-server
+#   ./zabbix-admin2.sh reparar            # BORRA y vuelve a crear la base de datos de Zabbix
+#   ./zabbix-admin2.sh idioma             # instala los idiomas (es_ES, en_US) para la web de Zabbix
+#   ./zabbix-admin2.sh respaldo           # respaldo diario de la base (rotación + verificación + envío)
+#   ./zabbix-admin2.sh restaurar-prueba   # prueba de restauración del último respaldo
+#   ./zabbix-admin2.sh red                # revisa la red: IP, puerta de enlace, internet y nodos
+#   ./zabbix-admin2.sh sin-vpn            # quita WireGuard (ya no se usa) y sus llaves
 #
 # RED: ya no se usa VPN. La VM va en modo puente y todos los equipos están en la red real
 # 192.168.14.0/24 (ver la guía del puente). Las IP están en el bloque "Parámetros" de abajo.
 #
 # PERMISOS: si al correr "./zabbix-admin.sh" sale "Permission denied", dale permiso de
-# ejecución una sola vez con:   chmod +x zabbix-admin.sh
+# ejecución una sola vez con:   chmod +x zabbix-admin2.sh
 # (o córrelo así sin cambiar permisos:   sudo bash zabbix-admin.sh servidor).
 # Si lo bajas de GitHub el permiso se pierde; para que viaje con el repositorio:
-#   git update-index --chmod=+x zabbix-admin.sh && git commit -m "script ejecutable"
+#   git update-index --chmod=+x zabbix-admin2.sh && git commit -m "script ejecutable"
 #
 # Orden recomendado en el servidor: hardening, servidor (ya incluye idioma), firewall, respaldo, monitor servidor.
 # Orden recomendado en cada nodo:   hardening, agente, monitor nodo.
@@ -60,12 +60,12 @@ RETENCION=7                          # cuántos respaldos se conservan en esta V
 DESTINO_RESPALDO="192.168.14.2"
 USUARIO_DESTINO="zabbix"             # usuario en el nodo de respaldo (ajústalo si es otro)
 RUTA_DESTINO="/var/backups/mesa4/zabbix"
-LOG="/var/log/zabbix-admin.log"
+LOG="/var/log/zabbix-admin2.log"
 CAMBIOS=0
 
 # Las IP que se escriben en el menú se guardan en este archivo y se leen en cada corrida.
 # Si se borra, el script vuelve a usar los valores por defecto de arriba.
-CONFIG="/etc/zabbix-admin.conf"
+CONFIG="/etc/zabbix-admin2.conf"
 if [[ -r "$CONFIG" ]]; then
     # shellcheck disable=SC1090
     source "$CONFIG"
