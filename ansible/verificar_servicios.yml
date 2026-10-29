@@ -1,0 +1,27 @@
+---
+- name: Verificación de Servicios
+  hosts: nodos
+  become: yes
+
+  vars:
+    servicios: "{{ ['ssh', 'fail2ban'] + ([] if 'pasarelas' in group_names else ['arpon']) }}"
+
+  tasks:
+    - name: Verificar estado de los servicios
+      ansible.builtin.command: systemctl is-active {{ item }}
+      loop: "{{ servicios }}"
+      register: estado
+      changed_when: false
+      failed_when: false
+
+    - name: Reportar estado de cada servicio
+      ansible.builtin.debug:
+        msg: "{{ '✅' if item.rc == 0 else '😨 ALERTA:' }} {{ item.item }} {{ 'está activo' if item.rc == 0 else 'está inactivo o no instalado' }} en {{ inventory_hostname }}"
+      loop: "{{ estado.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Aviso de ArpON omitido en pasarelas
+      ansible.builtin.debug:
+        msg: "ℹ️ ArpON no se revisa en {{ inventory_hostname }} (decisión del equipo, por keepalived)"
+      when: "'pasarelas' in group_names"

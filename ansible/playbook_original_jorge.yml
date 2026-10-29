@@ -1,0 +1,54 @@
+---
+- name: Verificación de Servicios
+  hosts: all
+  become: yes
+
+#Los emojis sacados de https://emojipedia.org/
+  tasks:
+    - name: Verificar estado de Fail2ban
+      ansible.builtin.command: systemctl is-active fail2ban
+      register: fail2ban_status
+      changed_when: false
+      failed_when: false
+
+    - name: Reportar estado de Fail2ban (Activo)
+      ansible.builtin.debug:
+        msg: "✅ Fail2ban está Activo y Protegiendo el Nodo!"
+      when: fail2ban_status.rc == 0
+
+    - name: Reportar estado de Fail2ban (Inactivo)
+      ansible.builtin.debug:
+        msg: "¡Alerta! 😨 Fail2ban no está Protegiendo el Nodo. ¿Inactivo o No Instalado?"
+      when: fail2ban_status.rc != 0
+
+    - name: Verificar estado de ArpON
+      ansible.builtin.command: systemctl is-active arpon
+      register: arpon_status
+      changed_when: false
+      failed_when: false
+
+    - name: Reportar estado de ArpON (Activo)
+      ansible.builtin.debug:
+        msg: "✅ ArpON está Activo y Protegiendo el Nodo!"
+      when: arpon_status.rc == 0
+
+    - name: Reportar estado de ArpON (Inactivo)
+      ansible.builtin.debug:
+        msg: "¡Alerta! 👀 ArpON no está Protegiendo el Nodo. ¿Inactivo o No Instalado?"
+      when: arpon_status.rc != 0
+
+    - name: Verificar estado de SSH
+      ansible.builtin.command: systemctl is-active ssh
+      register: ssh_status
+      changed_when: false
+      failed_when: false
+
+    - name: Reportar estado de SSH (Activo)
+      ansible.builtin.debug:
+        msg: "✅ SSH está Activo!"
+      when: ssh_status.rc == 0
+
+    - name: Reportar estado de SSH (Inactivo)
+      ansible.builtin.debug:
+        msg: "¡Precaución! 😰 SSH no está Activo."
+      when: ssh_status.rc != 0
