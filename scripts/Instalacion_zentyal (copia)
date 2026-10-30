@@ -1,0 +1,238 @@
+#!/bin/bash
+
+set -euo pipefail
+
+
+##
+# Global variables
+##
+
+# Colores para la salida
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+BOLD=$(tput bold)
+NORM=$(tput sgr0)
+
+# Variable globales
+UBUNTU_VER='Ubuntu 24.04'
+BOOT_SPACE='51200'
+SYSTEM_SPACE='358400'
+ZEN_VER='8.1'
+ZENTYAL_REPOSITORY_NAME='zentyal.sources'
+BASE_REPO_KEY_DIR='/etc/apt/trusted.gpg.d'
+ZEN_REPO_KEY="https://keys.zentyal.org/zentyal-${ZEN_VER}-packages-org.asc"
+ZEN_REPO_URL="deb [signed-by=${BASE_REPO_KEY_DIR}/zentyal-${ZEN_VER}-packages-org.asc] https://packages.zentyal.org/zentyal ${ZEN_VER} main extra"
+
+
+if  [ "$(whoami)" != root ] ;then
+	echo -e "${RED}[ERROR] Este scriot debe de ejecutarse con previlegios root.${NC}"
+	exit 1	
+fi
+
+
+# Functions
+##
+
+check_ubuntu() {
+	echo -e "\n${GREEN} - Comprobando la versión de Ubuntu requerida...${NC}"
+
+	if ! lsb_release -d | egrep -q "${UBUNTU_VER}.?[0-9]? LTS$"; then
+		echo -e "${RED}  La versión que está utilizando no es válida. Zentyal requiere ${UBUNTU_VER}.x LTS ${NC}"
+		exit 1
+	fi
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+check_broken_packages() {
+	echo -e "${GREEN} - Comprobando si hay paquetes rotos...${NC}"
+
+	if [[ $(dpkg -l | egrep -v '^ii|rc' | awk '{if(NR>5)print}' | wc -l) -gt 0 ]]; then
+		echo -e "${RED}  Tienes paquetes rotos; se está intentando repararlos.${NC}"
+
+		for i in {1..5}; do DEBIAN_FRONTEND=noninteractive apt --fix-broken install -y || true; done
+
+		if [[ $(dpkg -l | egrep -v '^ii|rc' | awk '{if(NR>5)print}' | wc -l) -gt 0 ]]; then
+			echo -e "${RED}  No se pudieron reparar los paquetes rotos.${NC}"
+			exit 1
+		fi
+
+		echo -e "${GREEN} Paquetes rotos corregidos. ${NORM}";echo
+	fi
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+check_available_packages() {
+	echo -e "${GREEN} - Comprobando si el sistema está actualizado...${NC}"
+	
+	export DEBIAN_FRONTEND=noninteractive
+	
+	#ACTUALIZAR EL SISTEMA SIN RUIDOS EN TERMINAL
+	apt update > /dev/null 2>&1 && \
+	apt -y upgrade > /dev/null 2>&1 &&  \
+	apt -y full-upgrade > /dev/null 2>&1 &&  \
+	apt -y autoremove > /dev/null 2>&1 &&  \
+	apt -y autoclean > /dev/null 2>&1 &&  \
+	apt -y clean > /dev/null
+	
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+check_disk_space() {
+	echo -e "${GREEN} - Comprobando el espacio en disco disponible...${NC}"
+
+	if [ $(df /boot | tail -1 | awk '{print $4}') -lt ${BOOT_SPACE} ]; then
+		echo -e "${RED}  Poco espacio en /boot ${NC}"
+		exit 1
+	fi
+
+	for partition in / /var; do
+		if [ $(df ${partition} | tail -1 | awk '{print $4}') -lt ${SYSTEM_SPACE} ]; then
+			echo -e "${RED}  Poco espacio en '${partition}'${NC}"
+			exit 1
+		fi
+	done
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+function check_connection() {
+ 	local CHECK_DOMAIN='packages.zentyal.org'
+
+	echo -e "${GREEN} - Comprobando la conexión a Internet...${NC}"
+
+	if [[ ! -f '/usr/bin/ping' ]]; then
+		DEBIAN_FRONTEND=noninteractive apt -y install iputils-ping > /dev/null 2>&1
+	fi
+
+	if ! ping -4 -W 15 -q -c 5 ${CHECK_DOMAIN} > /dev/null; then
+		echo -e "${RED}  Existen problemas con la resolución de Internet.${NC}"
+		exit 1
+	fi
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+check_webadmin_port() {
+	echo -e "${GREEN} - COmprobando que el puerto 8443/tcp este libre para el pnale web...${NC}"
+
+	if ss -tunpl | grep -q '8443'; then
+		echo -e "${RED}  El puerto 8443/tcp ya está en uso.${NC}"
+		exit 1
+	fi
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+}
+
+
+check_requirements() {
+	check_ubuntu
+	check_broken_packages
+	check_disk_space
+	check_available_packages
+	check_connection
+	check_webadmin_port
+}
+
+
+# This function adds the Zentyal repository
+set_repository_zentyal() {
+	echo -e "\n${YELLOW} - Configurando los repositorios de zentyal ${ZEN_VER}...${NC}"
+
+	rm -f ${BASE_REPO_KEY_DIR}/zentyal-*-packages-org.asc 2>/dev/null
+	wget -qO- ${ZEN_REPO_KEY} -O ${BASE_REPO_KEY_DIR}/zentyal-${ZEN_VER}-packages-org.asc
+
+cat > /etc/apt/sources.list.d/${ZENTYAL_REPOSITORY_NAME} <<EOF
+# Zentyal repository
+Types: deb
+URIs: https://packages.zentyal.org/zentyal
+Suites: ${ZEN_VER}
+Components: main extra
+Signed-By: ${BASE_REPO_KEY_DIR}/zentyal-${ZEN_VER}-packages-org.asc
+EOF
+
+	echo -e "${GREEN}...OK${NC}";echo
+}
+
+
+function add_repositories
+{
+	echo -e "${GREEN} - Limpiando repositorios antiguos y añadiendo los nuevos...${NC}\n"
+
+	# Eleminar cualquier rastro de repositorios viejos de zentyal para evitar problemas
+	for url in packages.zentyal.com packages.zentyal.org archive.zentyal.org archive.zentyal.com; do
+		sed -i "/${url}/d" /etc/apt/sources.list 2>/dev/null || true
+		find /etc/apt/sources.list.d/ -type f -exec sed -i "/${url}/d" {} \; 2>/dev/null || true
+	done
+
+	set_repository_zentyal
+	apt update > /dev/null 2>&1
+	echo -e "${GREEN}...OK${NC}";echo
+}
+
+function zentyal_installation
+{
+	echo -e "${GREEN} - Instalando Zentyal...${NC}\n"
+
+	DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends zentyal zenbuntu-core
+
+	touch /var/lib/zentyal/.commercial-edition
+	touch /var/lib/zentyal/.license
+
+	echo -e "${GREEN}${BOLD}...OK${NC}${NORM}";echo
+
+	echo -e "\n${GREEN}${BOLD}La instalacion se ha completado puede acceder a la interfaz web de Zentyal en:
+
+    * https://<zentyal-ip-address>:8443/
+
+  ${NC}${NORM}"
+
+	echo -e "${GREEN}...OK${NC}";echo
+}
+
+zentyal_modules() {
+	echo -e "${GREEN} - Instalando los modulos de Zentyal...${NC}\n"
+	apt install -y \
+		language-pack-es \
+        zentyal-core \
+        zentyal-network \
+        zentyal-firewall \
+        zentyal-dns \
+        zentyal-dhcp \
+        zentyal-ntp \
+        zentyal-squid \
+        zentyal-software
+	
+	for m in network firewall dns dhcp ntp squid software; do
+        zs "$m" enable
+    done
+
+    zs save
+    systemctl restart zentyal
+}
+
+##
+# Running the functions
+##
+
+check_requirements
+add_repositories
+zentyal_installation
+zentyal_modules
+
+###
+# Final commands
+###
+
+# Disable cloud-init
+touch /etc/cloud/cloud-init.disabled
+
+
